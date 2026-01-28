@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-950 text-slate-100 antialiased;
+  background-image:
+    radial-gradient(900px 420px at 10% -10%, rgba(56, 189, 248, 0.08), transparent 60%),
+    radial-gradient(700px 420px at 100% 0%, rgba(148, 163, 184, 0.08), transparent 60%),
+    radial-gradient(700px 400px at 50% 120%, rgba(14, 165, 233, 0.08), transparent 60%);
+}
+
+.card-sheen {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.92));
+}
