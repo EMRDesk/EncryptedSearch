@@ -36,7 +36,7 @@ const MODE_META: Record<Mode, { label: string; description: string; tag: string 
 const MODE_ORDER: Mode[] = ["blindIndex", "decryptScan", "clientCache", "plaintextIndex"];
 const GITHUB_URL =
   process.env.NEXT_PUBLIC_GITHUB_URL ?? "https://github.com/EMRDesk/EncryptedSearch";
-const AUTHOR_EMAIL = "james@emrdesk.com";
+const AUTHOR_EMAIL = "research@emrdesk.com";
 const CSV_HEADER = [
   "timestamp",
   "datasetId",
@@ -688,7 +688,7 @@ export default function Home() {
               <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Contact author</p>
               <p className="text-lg text-slate-100">Share feedback or request details</p>
             </div>
-            <p className="text-xs text-slate-500">Emails go to james@emrdesk.com</p>
+            <p className="text-xs text-slate-500">Emails go to research@emrdesk.com</p>
           </div>
           <form onSubmit={onSendContact} className="mt-4 grid gap-4 md:grid-cols-2">
             <label className="flex flex-col gap-2 text-sm text-slate-300">
