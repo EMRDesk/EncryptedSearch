@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { runBenchmark } from "../lib/benchmark";
 import type { BenchmarkResult, Mode } from "../lib/types";
 
@@ -18,7 +18,7 @@ const MODE_META: Record<Mode, { label: string; description: string; tag: string 
   },
   decryptScan: {
     label: "B. Decrypt-and-Scan",
-    description: "Fetch + decrypt a bucket, prefix match locally.",
+    description: "Fetch + decrypt the full dataset, prefix match locally.",
     tag: "Naive baseline"
   },
   clientCache: {
@@ -36,8 +36,55 @@ const MODE_META: Record<Mode, { label: string; description: string; tag: string 
 const MODE_ORDER: Mode[] = ["blindIndex", "decryptScan", "clientCache", "plaintextIndex"];
 const GITHUB_URL =
   process.env.NEXT_PUBLIC_GITHUB_URL ?? "https://github.com/EMRDesk/EncryptedSearch";
+const AUTHOR_EMAIL = "james@emrdesk.com";
+const CSV_HEADER = [
+  "timestamp",
+  "datasetId",
+  "datasetSize",
+  "query",
+  "mode",
+  "totalMs",
+  "indexMs",
+  "fetchMs",
+  "decryptMs",
+  "scanMs",
+  "cacheBuildMs",
+  "resultCount",
+  "sampleNote"
+].join(",");
 
 const formatMs = (value: number) => `${value.toFixed(1)} ms`;
+const escapeCsv = (value: string | number | boolean | null | undefined) =>
+  `"${String(value ?? "").replace(/"/g, "\"\"")}"`;
+
+const buildCsvRows = (
+  meta: {
+    timestamp: string;
+    datasetId: string;
+    datasetSize: number;
+    query: string;
+  },
+  results: BenchmarkResult[]
+) =>
+  results.map(result =>
+    [
+      meta.timestamp,
+      meta.datasetId,
+      meta.datasetSize,
+      meta.query,
+      result.mode,
+      result.totalMs.toFixed(1),
+      result.breakdown.indexMs.toFixed(1),
+      result.breakdown.fetchMs.toFixed(1),
+      result.breakdown.decryptMs.toFixed(1),
+      result.breakdown.scanMs.toFixed(1),
+      result.breakdown.cacheBuildMs ? result.breakdown.cacheBuildMs.toFixed(1) : "",
+      result.resultCount,
+      result.sampleNote ?? ""
+    ]
+      .map(escapeCsv)
+      .join(",")
+  );
 
 export default function Home() {
   const [datasetId, setDatasetId] = useState(DATASETS[0].id);
@@ -47,6 +94,15 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [autoRuns, setAutoRuns] = useState(20);
+  const [autoRunning, setAutoRunning] = useState(false);
+  const [autoProgress, setAutoProgress] = useState(0);
+  const runCountRef = useRef(0);
+  const csvLogRef = useRef<string[]>([CSV_HEADER]);
+  const [csvLogVersion, setCsvLogVersion] = useState(0);
+  const [contactName, setContactName] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
+  const [contactMessage, setContactMessage] = useState("");
 
   const datasetMeta = DATASETS.find(dataset => dataset.id === datasetId) ?? DATASETS[0];
   const passphrase = process.env.NEXT_PUBLIC_DEMO_PASSPHRASE || "demo-passphrase";
@@ -66,43 +122,8 @@ export default function Home() {
     JSON.stringify({ ...reportMeta, results }, null, 2);
 
   const toCsv = () => {
-    const escape = (value: string | number | boolean | null | undefined) =>
-      `"${String(value ?? "").replace(/"/g, "\"\"")}"`;
-    const header = [
-      "timestamp",
-      "datasetId",
-      "datasetSize",
-      "query",
-      "mode",
-      "totalMs",
-      "indexMs",
-      "fetchMs",
-      "decryptMs",
-      "scanMs",
-      "cacheBuildMs",
-      "resultCount",
-      "sampleNote"
-    ].join(",");
-    const rows = results.map(result =>
-      [
-        reportMeta.timestamp,
-        reportMeta.datasetId,
-        reportMeta.datasetSize,
-        reportMeta.query,
-        result.mode,
-        result.totalMs.toFixed(1),
-        result.breakdown.indexMs.toFixed(1),
-        result.breakdown.fetchMs.toFixed(1),
-        result.breakdown.decryptMs.toFixed(1),
-        result.breakdown.scanMs.toFixed(1),
-        result.breakdown.cacheBuildMs ? result.breakdown.cacheBuildMs.toFixed(1) : "",
-        result.resultCount,
-        result.sampleNote ?? ""
-      ]
-        .map(escape)
-        .join(",")
-    );
-    return [header, ...rows].join("\n");
+    const rows = buildCsvRows(reportMeta, results);
+    return [CSV_HEADER, ...rows].join("\n");
   };
 
   const copyText = async (text: string, label: string) => {
@@ -120,10 +141,101 @@ export default function Home() {
     }
   };
 
+  const hasCsvLog = csvLogVersion >= 0 && csvLogRef.current.length > 1;
+
+  const appendCsvLog = (
+    meta: { timestamp: string; datasetId: string; datasetSize: number; query: string },
+    run: BenchmarkResult[]
+  ) => {
+    const rows = buildCsvRows(meta, run);
+    csvLogRef.current.push(...rows);
+    setCsvLogVersion(version => version + 1);
+    return rows;
+  };
+
+  const getCsvLog = () => csvLogRef.current.join("\n");
+
+  const clearCsvLog = () => {
+    csvLogRef.current = [CSV_HEADER];
+    setCsvLogVersion(version => version + 1);
+    if (typeof window !== "undefined") {
+      const global = window as Window & { __benchmarkCsv?: string[] };
+      global.__benchmarkCsv = [CSV_HEADER];
+    }
+  };
+
+  const downloadCsvLog = () => {
+    const csv = getCsvLog();
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "benchmark-log.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const onSendContact = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const subject = `Encrypted Search Benchmark — Contact from ${contactName || "Visitor"}`;
+    const body = [
+      `Name: ${contactName || "N/A"}`,
+      `Email: ${contactEmail || "N/A"}`,
+      "",
+      contactMessage || ""
+    ].join("\n");
+    const mailto = `mailto:${AUTHOR_EMAIL}?subject=${encodeURIComponent(
+      subject
+    )}&body=${encodeURIComponent(body)}`;
+    window.location.href = mailto;
+  };
+
   const onToggleMode = (mode: Mode) => {
     setSelectedModes(prev =>
       prev.includes(mode) ? prev.filter(item => item !== mode) : [...prev, mode]
     );
+  };
+
+  const runOnce = async (config: {
+    datasetId: string;
+    datasetSize: number;
+    query: string;
+    modes: Mode[];
+    passphrase: string;
+  }) => {
+    runCountRef.current += 1;
+    const meta = {
+      timestamp: new Date().toISOString(),
+      datasetId: config.datasetId,
+      datasetSize: config.datasetSize,
+      query: config.query,
+      modes: config.modes
+    };
+    const run = await runBenchmark({
+      datasetId: config.datasetId,
+      query: config.query,
+      modes: config.modes,
+      passphrase: config.passphrase,
+      pqMode: false
+    });
+    setResults(run);
+    const payload = {
+      run: runCountRef.current,
+      ...meta,
+      results: run
+    };
+    const csvRows = appendCsvLog(meta, run);
+    const csvRun = [CSV_HEADER, ...csvRows].join("\n");
+    console.log("[Benchmark JSON]\\n" + JSON.stringify(payload));
+    console.log("[Benchmark CSV]\\n" + csvRun);
+    if (typeof window !== "undefined") {
+      const global = window as Window & { __benchmarkCsv?: string[] };
+      if (!global.__benchmarkCsv) {
+        global.__benchmarkCsv = [CSV_HEADER];
+      }
+      global.__benchmarkCsv.push(...csvRows);
+      console.log("[Benchmark CSV LOG]\\n" + global.__benchmarkCsv.join("\n"));
+    }
   };
 
   const onRunBenchmark = async () => {
@@ -136,22 +248,56 @@ export default function Home() {
       setError("Pick at least one mode to compare.");
       return;
     }
+    const config = {
+      datasetId,
+      datasetSize: datasetMeta.size,
+      query,
+      modes: selectedModes,
+      passphrase
+    };
 
     setLoading(true);
     try {
-      const run = await runBenchmark({
-        datasetId,
-        query,
-        modes: selectedModes,
-        passphrase,
-        pqMode: false
-      });
-      setResults(run);
+      await runOnce(config);
     } catch (err) {
       console.error(err);
       setError("Benchmark failed. Check Firestore config and dataset seeding.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const onRunMultiple = async () => {
+    setError(null);
+    if (!query.trim()) {
+      setError("Enter a search prefix to benchmark.");
+      return;
+    }
+    if (selectedModes.length === 0) {
+      setError("Pick at least one mode to compare.");
+      return;
+    }
+    const count = Number.isFinite(autoRuns) ? Math.max(1, Math.min(100, autoRuns)) : 1;
+    const config = {
+      datasetId,
+      datasetSize: datasetMeta.size,
+      query,
+      modes: selectedModes,
+      passphrase
+    };
+
+    setAutoRunning(true);
+    setAutoProgress(0);
+    try {
+      for (let i = 0; i < count; i += 1) {
+        setAutoProgress(i + 1);
+        await runOnce(config);
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Auto-run failed. Check Firestore config and dataset seeding.");
+    } finally {
+      setAutoRunning(false);
     }
   };
 
@@ -161,6 +307,7 @@ export default function Home() {
   }, [results]);
 
   const maxLatency = Math.max(1, ...results.map(result => result.totalMs));
+  const isRunning = loading || autoRunning;
 
   return (
     <main className="min-h-screen px-4 py-16">
@@ -275,11 +422,32 @@ export default function Home() {
             <button
               type="button"
               onClick={onRunBenchmark}
-              disabled={loading}
+              disabled={isRunning}
               className="rounded-full bg-sky-400 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {loading ? "Running benchmarks..." : "Run Benchmark"}
             </button>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+              <label className="flex items-center gap-2">
+                Runs
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={autoRuns}
+                  onChange={event => setAutoRuns(Number(event.target.value))}
+                  className="w-20 rounded-full border border-slate-800 bg-slate-950/60 px-3 py-1 text-xs text-slate-100"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={onRunMultiple}
+                disabled={isRunning}
+                className="rounded-full border border-slate-700/70 px-3 py-1 text-xs text-slate-200 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {autoRunning ? `Running ${autoProgress}/${autoRuns}` : `Run ${autoRuns}x`}
+              </button>
+            </div>
             {error ? <p className="text-sm text-rose-400">{error}</p> : null}
           </div>
         </section>
@@ -308,6 +476,30 @@ export default function Home() {
                 className="rounded-full border border-slate-700/70 px-4 py-2 text-xs text-slate-200 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Copy CSV
+              </button>
+              <button
+                type="button"
+                disabled={!hasCsvLog}
+                onClick={() => copyText(getCsvLog(), "CSV log")}
+                className="rounded-full border border-slate-700/70 px-4 py-2 text-xs text-slate-200 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Copy CSV log
+              </button>
+              <button
+                type="button"
+                disabled={!hasCsvLog}
+                onClick={downloadCsvLog}
+                className="rounded-full border border-slate-700/70 px-4 py-2 text-xs text-slate-200 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Download CSV
+              </button>
+              <button
+                type="button"
+                disabled={!hasCsvLog}
+                onClick={clearCsvLog}
+                className="rounded-full border border-slate-700/70 px-4 py-2 text-xs text-slate-200 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Clear log
               </button>
               <span className="text-xs text-slate-500">Times in milliseconds</span>
             </div>
@@ -422,6 +614,7 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+
             </div>
           )}
         </section>
@@ -467,7 +660,8 @@ export default function Home() {
               <li>Blind indexing leaks equality and access patterns.</li>
               <li>Mode D stores plaintext prefixes and violates zero-trust.</li>
               <li>Mode C stores decrypted data in IndexedDB on the client.</li>
-              <li>Mode B is expensive and uses sampling at large datasets.</li>
+              <li>Mode B is expensive and not scalable for large datasets.</li>
+              <li>Modes A/D fetch a capped subset when matches explode due to synthetic repetition.</li>
             </ul>
             <div className="mt-4 border-t border-slate-800/60 pt-3">
               <p className="text-slate-300">Paper</p>
@@ -486,6 +680,67 @@ export default function Home() {
               <li>64-byte KDF output split into encKey + indexKey.</li>
             </ul>
           </div>
+        </section>
+
+        <section className="rounded-3xl border border-slate-800/60 bg-slate-950/60 p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Contact author</p>
+              <p className="text-lg text-slate-100">Share feedback or request details</p>
+            </div>
+            <p className="text-xs text-slate-500">Emails go to james@emrdesk.com</p>
+          </div>
+          <form onSubmit={onSendContact} className="mt-4 grid gap-4 md:grid-cols-2">
+            <label className="flex flex-col gap-2 text-sm text-slate-300">
+              Name
+              <input
+                value={contactName}
+                onChange={event => setContactName(event.target.value)}
+                placeholder="Your name"
+                className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-sky-400"
+              />
+            </label>
+            <label className="flex flex-col gap-2 text-sm text-slate-300">
+              Email
+              <input
+                value={contactEmail}
+                onChange={event => setContactEmail(event.target.value)}
+                placeholder="you@company.com"
+                type="email"
+                className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-sky-400"
+              />
+            </label>
+            <label className="flex flex-col gap-2 text-sm text-slate-300 md:col-span-2">
+              Message
+              <textarea
+                value={contactMessage}
+                onChange={event => setContactMessage(event.target.value)}
+                placeholder="Tell us about your use case or question."
+                rows={4}
+                className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-sky-400"
+              />
+            </label>
+            <div className="flex flex-wrap items-center gap-3 md:col-span-2">
+              <button
+                type="submit"
+                className="rounded-full bg-sky-400 px-5 py-2 text-xs font-semibold text-slate-900 transition hover:bg-sky-300"
+              >
+                Send email
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  copyText(
+                    `Name: ${contactName || "N/A"}\nEmail: ${contactEmail || "N/A"}\n\n${contactMessage}`,
+                    "Contact details"
+                  )
+                }
+                className="rounded-full border border-slate-700/70 px-4 py-2 text-xs text-slate-200 transition hover:border-slate-400"
+              >
+                Copy message
+              </button>
+            </div>
+          </form>
         </section>
 
         <footer className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">

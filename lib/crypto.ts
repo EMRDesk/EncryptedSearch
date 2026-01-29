@@ -60,6 +60,12 @@ const base64UrlToBytes = (value: string): Uint8Array => {
   return base64ToBytes(padded);
 };
 
+const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+};
+
 export const getSalt = (): Uint8Array => {
   const salt = process.env.NEXT_PUBLIC_KDF_SALT || "encrypted-search-demo-salt";
   return textEncoder.encode(salt);
@@ -70,6 +76,8 @@ export const deriveKeys = async (
   salt: Uint8Array,
   options: KdfOptions
 ): Promise<{ encKey: CryptoKey; indexKey: CryptoKey }> => {
+  const saltBuffer = new ArrayBuffer(salt.byteLength);
+  new Uint8Array(saltBuffer).set(salt);
   const baseKey = await crypto.subtle.importKey(
     "raw",
     textEncoder.encode(passphrase),
@@ -81,7 +89,7 @@ export const deriveKeys = async (
   const bits = await crypto.subtle.deriveBits(
     {
       name: "PBKDF2",
-      salt,
+      salt: saltBuffer,
       iterations: options.iterations,
       hash: "SHA-256"
     },
@@ -118,7 +126,11 @@ export const encryptJson = async (
 ): Promise<{ ct: string; iv: string }> => {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const plaintext = textEncoder.encode(JSON.stringify(payload));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, encKey, plaintext);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    encKey,
+    plaintext
+  );
   return {
     ct: bytesToBase64(new Uint8Array(ciphertext)),
     iv: bytesToBase64(iv)
@@ -132,7 +144,11 @@ export const decryptJson = async <T>(
 ): Promise<T> => {
   const ciphertext = base64ToBytes(ct);
   const ivBytes = base64ToBytes(iv);
-  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivBytes }, encKey, ciphertext);
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(ivBytes) },
+    encKey,
+    toArrayBuffer(ciphertext)
+  );
   return JSON.parse(textDecoder.decode(plaintext)) as T;
 };
 

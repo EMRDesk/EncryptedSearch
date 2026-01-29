@@ -7,6 +7,7 @@ import {
   limit,
   orderBy,
   query,
+  startAfter,
   where
 } from "firebase/firestore";
 import { db } from "./firebase";
@@ -27,6 +28,8 @@ import type { BenchmarkResult, Mode, PersonRecord } from "./types";
 
 const CACHE_CAP = 10_000;
 const MAX_HITS = 20;
+const FULL_SCAN_PAGE_SIZE = 1000;
+const MAX_RESULT_FETCH = 50;
 
 const DATASET_SIZES: Record<string, number> = {
   "people-1k": 1_000,
@@ -96,9 +99,41 @@ const scanRecords = (records: PersonRecord[], normalizedQuery: string) => {
   return { matches, scanMs };
 };
 
-const buildSampleNote = (sampleSize: number, datasetSize: number) => {
-  if (sampleSize >= datasetSize) return undefined;
-  return `Sampled first ${sampleSize.toLocaleString()} of ~${datasetSize.toLocaleString()} records.`;
+const fetchAllRecords = async (datasetId: string, pageSize: number) => {
+  const start = now();
+  const docs: { id: string; ct: string; iv: string }[] = [];
+  let lastId: string | undefined;
+
+  while (true) {
+    const baseQuery = query(
+      collection(db, `datasets/${datasetId}/records`),
+      orderBy(documentId()),
+      limit(pageSize)
+    );
+    const pageQuery = lastId
+      ? query(
+          collection(db, `datasets/${datasetId}/records`),
+          orderBy(documentId()),
+          startAfter(lastId),
+          limit(pageSize)
+        )
+      : baseQuery;
+    const snapshot = await getDocs(pageQuery);
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data() as { ct: string; iv: string };
+      docs.push({ id: docSnap.id, ct: data.ct, iv: data.iv });
+    });
+    if (snapshot.docs.length < pageSize) {
+      break;
+    }
+    lastId = snapshot.docs[snapshot.docs.length - 1]?.id;
+    if (!lastId) {
+      break;
+    }
+  }
+
+  const fetchMs = now() - start;
+  return { docs, fetchMs };
 };
 
 export const runBenchmark = async (options: {
@@ -127,8 +162,15 @@ export const runBenchmark = async (options: {
       const indexDoc = await getDoc(doc(db, `datasets/${datasetId}/index/${token}`));
       const indexMs = now() - indexStart;
       const recordIds = (indexDoc.data()?.recordIds as string[]) ?? [];
+      const totalCount = recordIds.length;
+      const cappedIds =
+        totalCount > MAX_RESULT_FETCH ? recordIds.slice(0, MAX_RESULT_FETCH) : recordIds;
+      const sampleNote =
+        totalCount > MAX_RESULT_FETCH
+          ? `Fetched first ${MAX_RESULT_FETCH.toLocaleString()} of ${totalCount.toLocaleString()} matches due to synthetic data repetition.`
+          : undefined;
 
-      const { docs, fetchMs } = await fetchRecordsByIds(datasetId, recordIds);
+      const { docs, fetchMs } = await fetchRecordsByIds(datasetId, cappedIds);
       const { records, decryptMs } = await decryptRecords(docs, encKey);
 
       results.push({
@@ -140,7 +182,8 @@ export const runBenchmark = async (options: {
           decryptMs,
           scanMs: 0
         },
-        resultCount: records.length,
+        resultCount: totalCount,
+        sampleNote,
         hits: records.slice(0, MAX_HITS)
       });
       continue;
@@ -154,8 +197,15 @@ export const runBenchmark = async (options: {
       );
       const indexMs = now() - indexStart;
       const recordIds = (prefixDoc.data()?.recordIds as string[]) ?? [];
+      const totalCount = recordIds.length;
+      const cappedIds =
+        totalCount > MAX_RESULT_FETCH ? recordIds.slice(0, MAX_RESULT_FETCH) : recordIds;
+      const sampleNote =
+        totalCount > MAX_RESULT_FETCH
+          ? `Fetched first ${MAX_RESULT_FETCH.toLocaleString()} of ${totalCount.toLocaleString()} matches due to synthetic data repetition.`
+          : undefined;
 
-      const { docs, fetchMs } = await fetchRecordsByIds(datasetId, recordIds);
+      const { docs, fetchMs } = await fetchRecordsByIds(datasetId, cappedIds);
       const { records, decryptMs } = await decryptRecords(docs, encKey);
 
       results.push({
@@ -167,21 +217,15 @@ export const runBenchmark = async (options: {
           decryptMs,
           scanMs: 0
         },
-        resultCount: records.length,
+        resultCount: totalCount,
+        sampleNote,
         hits: records.slice(0, MAX_HITS)
       });
       continue;
     }
 
     if (mode === "decryptScan") {
-      const datasetSize = getDatasetSize(datasetId);
-      const sampleSize = datasetSize <= 1000 ? datasetSize : 2000;
-      const note =
-        datasetSize >= 100_000
-          ? `Sampled first ${sampleSize.toLocaleString()} of ~${datasetSize.toLocaleString()} records. Full scan disabled at this size.`
-          : buildSampleNote(sampleSize, datasetSize);
-
-      const { docs, fetchMs } = await fetchRecordPage(datasetId, sampleSize);
+      const { docs, fetchMs } = await fetchAllRecords(datasetId, FULL_SCAN_PAGE_SIZE);
       const { records, decryptMs } = await decryptRecords(docs, encKey);
       const { matches, scanMs } = scanRecords(records, normalizedQuery);
 
@@ -195,7 +239,6 @@ export const runBenchmark = async (options: {
           scanMs
         },
         resultCount: matches.length,
-        sampleNote: note,
         hits: matches.slice(0, MAX_HITS)
       });
       continue;
@@ -203,7 +246,9 @@ export const runBenchmark = async (options: {
 
     if (mode === "clientCache") {
       const datasetSize = getDatasetSize(datasetId);
+      const cacheReadStart = now();
       const cached = await getCachedDataset(datasetId);
+      const cacheReadMs = now() - cacheReadStart;
       let cacheBuildMs: number | undefined;
       let fetchMs = 0;
       let decryptMs = 0;
@@ -243,7 +288,10 @@ export const runBenchmark = async (options: {
       const scanStart = now();
       const matches = searchCache(records, normalizedQuery);
       const scanMs = now() - scanStart;
-      const totalMs = cached ? scanMs : (cacheBuildMs ?? 0) + scanMs;
+      if (cached) {
+        fetchMs = cacheReadMs;
+      }
+      const totalMs = cached ? cacheReadMs + scanMs : (cacheBuildMs ?? 0) + scanMs;
 
       results.push({
         mode,

@@ -6,7 +6,7 @@ A Next.js + Firestore demo that compares four searchable-encryption modes side-b
 
 - Runs the same prefix search across four modes:
   - **A. Blind Index**: HMAC token lookup + encrypted record fetch + client decrypt.
-  - **B. Decrypt-and-Scan**: fetch a bucket, decrypt, prefix scan locally (sampled at large N).
+- **B. Decrypt-and-Scan**: fetch the full dataset, decrypt, prefix scan locally (slow).
   - **C. Client Cache**: build IndexedDB cache, then local prefix search (shows cold + warm).
   - **D. Plaintext Index**: control mode with plaintext prefixes stored in Firestore (violates zero-trust).
 - Shows total latency + breakdown (index, fetch, decrypt, scan, cache build).
@@ -128,7 +128,8 @@ service cloud.firestore {
 - Blind indexing leaks equality/frequency/access patterns.
 - Mode D violates zero-trust by storing plaintext prefixes.
 - Mode C caches decrypted records in IndexedDB on the client.
-- Mode B is computationally expensive and is sampled for large datasets.
+- Mode B is computationally expensive and not scalable for large datasets.
+- Modes A/D cap fetched matches in the demo due to synthetic data repetition.
 
 ## Deployment
 

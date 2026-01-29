@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "encryptedsearchandsort"
+  },
+  "targets": {
+    "encryptedsearchandsort": {
+      "hosting": {
+        "encryptedsearch": [
+          "encryptedsearch"
+        ]
+      }
+    }
+  }
+}
